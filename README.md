@@ -1,4 +1,4 @@
-# Vision Transformer Diffusion Model - Pure NumPy Implementation
+# Vision Transformer Diffusion Model -- Pure NumPy Implementation
 
 An **educational-grade** implementation of a Generative Neural Network combining **Vision Transformers (ViT)** and **Diffusion Models** using **pure NumPy**. This project demonstrates how state-of-the-art generative AI works from first principles, with no PyTorch or TensorFlow dependencies.
 
