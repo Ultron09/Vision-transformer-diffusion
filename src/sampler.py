@@ -39,14 +39,16 @@ class DDPMSampler:
         """
         self.diffusion = diffusion
     
-    def sample(self, model, shape, clip_denoised=True, progress_callback=None):
+    def sample(self, model, shape, clip_denoised=True, guidance_scale=1.0, class_labels=None, progress_callback=None):
         """
-        Generate samples using DDPM sampling
+        Generate samples using DDPM sampling with optional Classifier-Free Guidance (CFG).
         
         Args:
             model: Trained denoising model
             shape: Shape of images to generate (batch_size, H, W, C)
             clip_denoised: Whether to clip predicted x_0 to [-1, 1]
+            guidance_scale: Scale for CFG (1.0 = standard unconditional/conditional, >1.0 = amplified guidance)
+            class_labels: Optional condition labels
             progress_callback: Optional callback function(step, x_t) for visualization
             
         Returns:
@@ -61,8 +63,13 @@ class DDPMSampler:
         for i in reversed(range(self.diffusion.num_timesteps)):
             t = np.full((batch_size,), i, dtype=np.int32)
             
-            # Denoise one step
-            x = self.diffusion.p_sample(model, x, t, clip_denoised=clip_denoised)
+            # Denoise one step with CFG if enabled
+            if guidance_scale != 1.0 or class_labels is not None:
+                x = self.diffusion.p_sample_cfg(
+                    model, x, t, class_labels=class_labels, guidance_scale=guidance_scale, clip_denoised=clip_denoised
+                )
+            else:
+                x = self.diffusion.p_sample(model, x, t, clip_denoised=clip_denoised)
             
             # Progress callback
             if progress_callback is not None:

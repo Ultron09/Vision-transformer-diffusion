@@ -285,6 +285,74 @@ class GaussianDiffusion:
         
         return img
     
+    def p_mean_variance_cfg(self, model, x_t, t, class_labels=None, guidance_scale=7.5, clip_denoised=True):
+        """
+        Compute Gaussian reverse step mean and variance using Classifier-Free Guidance (CFG).
+        
+        Formula:
+            ε̃_θ(x_t, c) = ε_θ(x_t, ∅) + s · (ε_θ(x_t, c) - ε_θ(x_t, ∅))
+            
+        Args:
+            model: Denoising model supporting conditional/unconditional forward pass
+            x_t: Noisy latent images (B, H, W, C)
+            t: Timesteps (B,)
+            class_labels: Conditional class labels or context embeddings
+            guidance_scale: Strength of guidance s (1.0 = standard conditional, >1.0 = amplified)
+            clip_denoised: Whether to clip predicted x_0 to [-1, 1]
+            
+        Returns:
+            Tuple of (model_mean, posterior_variance, posterior_log_variance, pred_x_start)
+        """
+        # Unconditional forward pass
+        uncond_noise = model(x_t, t)
+        
+        if class_labels is not None and guidance_scale != 1.0:
+            cond_noise = model(x_t, t, class_labels=class_labels) if hasattr(model, 'forward_conditional') else model(x_t, t)
+            pred_noise = uncond_noise + guidance_scale * (cond_noise - uncond_noise)
+        else:
+            pred_noise = uncond_noise
+            
+        pred_x_start = self.predict_x_start_from_noise(x_t, t, pred_noise)
+        if clip_denoised:
+            pred_x_start = np.clip(pred_x_start, -1.0, 1.0)
+            
+        model_mean, posterior_variance, posterior_log_variance = \
+            self.q_posterior_mean_variance(pred_x_start, x_t, t)
+        return model_mean, posterior_variance, posterior_log_variance, pred_x_start
+        
+    def p_sample_cfg(self, model, x_t, t, class_labels=None, guidance_scale=7.5, clip_denoised=True):
+        """
+        Sample one reverse diffusion step with classifier-free guidance.
+        """
+        model_mean, _, model_log_variance, _ = self.p_mean_variance_cfg(
+            model, x_t, t, class_labels=class_labels, guidance_scale=guidance_scale, clip_denoised=clip_denoised
+        )
+        noise = np.random.randn(*x_t.shape)
+        nonzero_mask = (t != 0).astype(np.float32)
+        for _ in range(len(x_t.shape) - 1):
+            nonzero_mask = nonzero_mask[:, np.newaxis]
+            
+        return model_mean + nonzero_mask * np.exp(0.5 * model_log_variance) * noise
+        
+    def q_interpolate(self, x_start1, x_start2, t, alpha=0.5):
+        """
+        Spherical linear / geodesic interpolation between two clean images in noise space at timestep t.
+        
+        Args:
+            x_start1: First clean image batch (B, H, W, C)
+            x_start2: Second clean image batch (B, H, W, C)
+            t: Timestep integer or array
+            alpha: Interpolation weight between [0, 1]
+            
+        Returns:
+            Interpolated noisy image tensor x_t
+        """
+        if isinstance(t, int):
+            t = np.full((x_start1.shape[0],), t, dtype=np.int32)
+        noise = np.random.randn(*x_start1.shape)
+        x_interp = (1.0 - alpha) * x_start1 + alpha * x_start2
+        return self.q_sample(x_interp, t, noise=noise)
+    
     def training_losses(self, model, x_start, t, noise=None):
         """
         Compute training loss for diffusion model
