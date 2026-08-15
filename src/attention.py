@@ -318,3 +318,130 @@ class ScaledDotProductAttention:
     
     def __call__(self, q, k, v, mask=None):
         return self.forward(q, k, v, mask)
+
+
+class MultiHeadCrossAttention:
+    """
+    Multi-Head Cross-Attention Layer for Conditioning
+    
+    Allows queries from sequence X to attend to keys/values from context sequence Y.
+    Commonly used in text-conditioned or context-guided diffusion transformers (DiT).
+    
+    Architecture:
+        Query Q <- Linear(x_q)
+        Key K, Value V <- Linear(x_kv)
+        Attention(Q, K, V) = softmax(QK^T / √d_k) V -> Output projection
+    """
+    
+    def __init__(self, embed_dim, context_dim=None, num_heads=8, dropout=0.0, bias=True):
+        """
+        Initialize Multi-Head Cross Attention
+        
+        Args:
+            embed_dim: Dimension of query representations
+            context_dim: Dimension of context key/value representations (defaults to embed_dim)
+            num_heads: Number of attention heads
+            dropout: Dropout probability
+            bias: Whether to use projection bias
+        """
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        self.embed_dim = embed_dim
+        self.context_dim = context_dim if context_dim is not None else embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        
+        self.q_proj = Linear(embed_dim, embed_dim, bias=bias)
+        self.k_proj = Linear(self.context_dim, embed_dim, bias=bias)
+        self.v_proj = Linear(self.context_dim, embed_dim, bias=bias)
+        self.out_proj = Linear(embed_dim, embed_dim, bias=bias)
+        
+        self.attn_dropout = Dropout(dropout)
+        self.softmax = Softmax(axis=-1)
+        self.cache = None
+        
+    def forward(self, x, context, mask=None):
+        """
+        Forward pass
+        
+        Args:
+            x: Query sequence tensor (B, N_q, embed_dim)
+            context: Context sequence tensor (B, N_kv, context_dim)
+            mask: Optional attention mask (B, N_q, N_kv)
+            
+        Returns:
+            Output tensor (B, N_q, embed_dim)
+        """
+        B, N_q, _ = x.shape
+        _, N_kv, _ = context.shape
+        
+        q = self.q_proj(x).reshape(B, N_q, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        k = self.k_proj(context).reshape(B, N_kv, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        v = self.v_proj(context).reshape(B, N_kv, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        
+        scores = np.matmul(q, k.transpose(0, 1, 3, 2)) * self.scale
+        if mask is not None:
+            if mask.ndim == 3:
+                mask = mask[:, np.newaxis, :, :]
+            scores = np.where(mask, -1e9, scores)
+            
+        attn_weights = self.softmax(scores)
+        attn_weights_dropped = self.attn_dropout(attn_weights)
+        out = np.matmul(attn_weights_dropped, v).transpose(0, 2, 1, 3).reshape(B, N_q, self.embed_dim)
+        out = self.out_proj(out)
+        
+        self.cache = {
+            'x': x, 'context': context, 'q': q, 'k': k, 'v': v,
+            'attn_weights': attn_weights, 'attn_weights_dropped': attn_weights_dropped,
+            'B': B, 'N_q': N_q, 'N_kv': N_kv
+        }
+        return out
+        
+    def backward(self, grad_output):
+        """Backward pass for Cross-Attention"""
+        c = self.cache
+        grad_out = self.out_proj.backward(grad_output)
+        grad_out = grad_out.reshape(c['B'], c['N_q'], self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        
+        grad_attn_dropped = np.matmul(grad_out, c['v'].transpose(0, 1, 3, 2))
+        grad_v = np.matmul(c['attn_weights_dropped'].transpose(0, 1, 3, 2), grad_out)
+        
+        grad_attn = self.attn_dropout.backward(grad_attn_dropped)
+        grad_scores = self.softmax.backward(grad_attn) * self.scale
+        
+        grad_q = np.matmul(grad_scores, c['k'])
+        grad_k = np.matmul(grad_scores.transpose(0, 1, 3, 2), c['q'])
+        
+        grad_q = grad_q.transpose(0, 2, 1, 3).reshape(c['B'], c['N_q'], self.embed_dim)
+        grad_k = grad_k.transpose(0, 2, 1, 3).reshape(c['B'], c['N_kv'], self.embed_dim)
+        grad_v = grad_v.transpose(0, 2, 1, 3).reshape(c['B'], c['N_kv'], self.embed_dim)
+        
+        grad_x = self.q_proj.backward(grad_q)
+        grad_ctx_k = self.k_proj.backward(grad_k)
+        grad_ctx_v = self.v_proj.backward(grad_v)
+        grad_context = grad_ctx_k + grad_ctx_v
+        
+        return grad_x, grad_context
+        
+    def parameters(self):
+        params = {}
+        for name, layer in [('q', self.q_proj), ('k', self.k_proj), ('v', self.v_proj), ('out', self.out_proj)]:
+            for k, v in layer.parameters().items():
+                params[f'{name}_{k}'] = v
+        return params
+        
+    def gradients(self):
+        grads = {}
+        for name, layer in [('q', self.q_proj), ('k', self.k_proj), ('v', self.v_proj), ('out', self.out_proj)]:
+            for k, v in layer.gradients().items():
+                grads[f'{name}_{k}'] = v
+        return grads
+        
+    def train(self):
+        self.attn_dropout.train()
+        
+    def eval(self):
+        self.attn_dropout.eval()
+        
+    def __call__(self, x, context, mask=None):
+        return self.forward(x, context, mask)
