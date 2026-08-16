@@ -18,6 +18,7 @@ from . import unet_vit
 from . import trainer
 from . import sampler
 from . import data_utils
+from . import rope
 
 __all__ = [
     "activations",
@@ -32,4 +33,5 @@ __all__ = [
     "trainer",
     "sampler",
     "data_utils",
+    "rope",
 ]
