@@ -407,3 +407,93 @@ class GaussianDiffusion:
             res = res[..., np.newaxis]
         
         return res
+
+
+class EDMNoiseSchedule:
+    """
+    Continuous-Time Noise Scheduling and Preconditioning (Karras et al., 2022)
+    
+    Implements the EDM (Elucidating the Design Space of Diffusion Models) formulation.
+    Decouples noise scale distribution, network preconditioning, and numerical ODE discretization.
+    
+    Formulas:
+        sigma_i = (sigma_max^(1/rho) + i/(N-1) * (sigma_min^(1/rho) - sigma_max^(1/rho)))^rho
+        c_skip(sigma) = sigma_data^2 / (sigma^2 + sigma_data^2)
+        c_out(sigma) = sigma * sigma_data / sqrt(sigma^2 + sigma_data^2)
+        c_in(sigma) = 1 / sqrt(sigma^2 + sigma_data^2)
+        c_noise(sigma) = 0.25 * ln(sigma)
+    """
+    
+    def __init__(self, sigma_min=0.002, sigma_max=80.0, rho=7.0, sigma_data=0.5):
+        """
+        Initialize EDM Noise Schedule
+        
+        Args:
+            sigma_min: Smallest noise level
+            sigma_max: Highest noise level
+            rho: Curvature parameter controlling step allocation across noise levels
+            sigma_data: Standard deviation of clean training data distribution
+        """
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.rho = rho
+        self.sigma_data = sigma_data
+        
+    def get_sigmas(self, num_steps):
+        """
+        Compute deterministic geometric noise ladder with rho curvature.
+        
+        Args:
+            num_steps: Total sampling discretization steps
+            
+        Returns:
+            Array of noise levels of length num_steps + 1 (ending with sigma=0)
+        """
+        ramp = np.linspace(0, 1, num_steps, dtype=np.float64)
+        min_inv_rho = self.sigma_min ** (1.0 / self.rho)
+        max_inv_rho = self.sigma_max ** (1.0 / self.rho)
+        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** self.rho
+        return np.concatenate([sigmas, [0.0]]).astype(np.float32)
+        
+    def c_skip(self, sigma):
+        """Skip connection scaling factor"""
+        return (self.sigma_data ** 2) / (sigma ** 2 + self.sigma_data ** 2)
+        
+    def c_out(self, sigma):
+        """Model output scaling factor"""
+        return (sigma * self.sigma_data) / np.sqrt(sigma ** 2 + self.sigma_data ** 2)
+        
+    def c_in(self, sigma):
+        """Input normalization scaling factor"""
+        return 1.0 / np.sqrt(sigma ** 2 + self.sigma_data ** 2)
+        
+    def c_noise(self, sigma):
+        """Continuous noise embedding conditioning scale"""
+        return 0.25 * np.log(np.maximum(sigma, 1e-20))
+        
+    def precondition(self, model, x_noisy, sigma):
+        """
+        Evaluate model under standard EDM preconditioning.
+        
+        D_theta(x, sigma) = c_skip(sigma) * x + c_out(sigma) * F_theta(c_in(sigma) * x, c_noise(sigma))
+        """
+        # Reshape sigma for broadcasting
+        sig = sigma
+        if np.isscalar(sig):
+            sig = np.full((x_noisy.shape[0],), sig, dtype=np.float32)
+        
+        sig_broadcast = sig
+        while sig_broadcast.ndim < x_noisy.ndim:
+            sig_broadcast = sig_broadcast[..., np.newaxis]
+            
+        c_sk = self.c_skip(sig_broadcast)
+        c_ou = self.c_out(sig_broadcast)
+        c_i = self.c_in(sig_broadcast)
+        c_n = self.c_noise(sig)
+        
+        x_scaled = c_i * x_noisy
+        f_theta = model(x_scaled, c_n)
+        
+        denoised = c_sk * x_noisy + c_ou * f_theta
+        return denoised
+
