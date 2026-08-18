@@ -228,6 +228,125 @@ class DDIMSampler:
         return x_prev
 
 
+
+class DPMSolverPlusPlus:
+    """
+    DPM-Solver++ Fast High-Order Diffusion ODE Solver (Lu et al., 2022)
+    
+    A specialized fast solver designed for diffusion ODEs that converges in 15-20 steps
+    by computing exact analytical solutions for the linear component and using multistep
+    polynomial approximations for the score model.
+    """
+    
+    def __init__(self, diffusion, order=2):
+        """
+        Initialize DPM-Solver++
+        
+        Args:
+            diffusion: GaussianDiffusion instance
+            order: Solver order (1 = DDIM / Euler-Maruyama, 2 = DPM-Solver-2)
+        """
+        self.diffusion = diffusion
+        self.order = order
+        
+    def sample(self, model, shape, num_steps=20, clip_denoised=True, guidance_scale=1.0, class_labels=None):
+        """
+        Generate samples using DPM-Solver++ in fewer integration steps.
+        
+        Args:
+            model: Denoising network
+            shape: Target sample shape (B, H, W, C)
+            num_steps: Discretized ODE integration steps
+            clip_denoised: Clip x_0 prediction
+            guidance_scale: Classifier-free guidance multiplier
+            class_labels: Class conditioning
+            
+        Returns:
+            Generated image array (B, H, W, C)
+        """
+        batch_size = shape[0]
+        timesteps = np.linspace(self.diffusion.num_timesteps - 1, 0, num_steps, dtype=np.int32)
+        
+        x = np.random.randn(*shape)
+        old_pred_x0 = None
+        
+        for i, step in enumerate(timesteps):
+            t = np.full((batch_size,), step, dtype=np.int32)
+            
+            # Predict noise
+            if guidance_scale != 1.0 or class_labels is not None:
+                _, _, _, pred_x0 = self.diffusion.p_mean_variance_cfg(
+                    model, x, t, class_labels=class_labels, guidance_scale=guidance_scale, clip_denoised=clip_denoised
+                )
+            else:
+                _, _, _, pred_x0 = self.diffusion.p_mean_variance(model, x, t, clip_denoised=clip_denoised)
+                
+            alpha_t = self.diffusion.alphas_cumprod[step]
+            sigma_t = np.sqrt(1.0 - alpha_t)
+            
+            if i == len(timesteps) - 1:
+                # Final step returns clean reconstruction
+                x = pred_x0
+                break
+                
+            step_next = timesteps[i + 1]
+            alpha_next = self.diffusion.alphas_cumprod[step_next]
+            sigma_next = np.sqrt(1.0 - alpha_next)
+            
+            lambda_t = np.log(np.sqrt(alpha_t) / sigma_t)
+            lambda_next = np.log(np.sqrt(alpha_next) / sigma_next)
+            h = lambda_next - lambda_t
+            
+            if self.order == 1 or old_pred_x0 is None:
+                # 1st-order update (Euler step in log-SNR space)
+                x = (sigma_next / sigma_t) * x - np.sqrt(alpha_next) * (np.expm1(-h)) * pred_x0
+            else:
+                # 2nd-order Multistep Adams-Bashforth update
+                r = (lambda_t - np.log(np.sqrt(self.diffusion.alphas_cumprod[timesteps[i - 1]]) / np.sqrt(1.0 - self.diffusion.alphas_cumprod[timesteps[i - 1]]))) / h
+                D = (1.0 + 0.5 / (r + 1e-6)) * pred_x0 - (0.5 / (r + 1e-6)) * old_pred_x0
+                x = (sigma_next / sigma_t) * x - np.sqrt(alpha_next) * np.expm1(-h) * D
+                
+            old_pred_x0 = pred_x0
+            
+        return x
+
+
+class Heun2ndOrderSampler:
+    """
+    Second-Order Heun / Runge-Kutta Predictor-Corrector Sampler (Karras et al., 2022)
+    
+    Provides second-order accuracy along probability flow ODE trajectories.
+    """
+    
+    def __init__(self, schedule=None):
+        from .diffusion_process import EDMNoiseSchedule
+        self.schedule = schedule if schedule is not None else EDMNoiseSchedule()
+        
+    def sample(self, model, shape, num_steps=20):
+        """
+        Run 2nd-order Heun ODE integration.
+        """
+        sigmas = self.schedule.get_sigmas(num_steps)
+        x = np.random.randn(*shape) * sigmas[0]
+        
+        for i in range(num_steps):
+            sigma_cur = sigmas[i]
+            sigma_next = sigmas[i + 1]
+            
+            # 1. Evaluate Euler predictor
+            d_cur = (x - self.schedule.precondition(model, x, sigma_cur)) / sigma_cur
+            x_next = x + (sigma_next - sigma_cur) * d_cur
+            
+            # 2. Heun 2nd-order corrector step
+            if sigma_next != 0:
+                d_next = (x_next - self.schedule.precondition(model, x_next, sigma_next)) / sigma_next
+                x = x + (sigma_next - sigma_cur) * 0.5 * (d_cur + d_next)
+            else:
+                x = x_next
+                
+        return x
+
+
 def generate_samples(model, diffusion, num_samples, img_size, channels=3,
                      sampler='ddpm', **sampler_kwargs):
     """
@@ -239,7 +358,7 @@ def generate_samples(model, diffusion, num_samples, img_size, channels=3,
         num_samples: Number of images to generate
         img_size: Image size (height and width)
         channels: Number of channels
-        sampler: Sampler type ('ddpm' or 'ddim')
+        sampler: Sampler type ('ddpm', 'ddim', 'dpm', 'heun')
         **sampler_kwargs: Additional arguments for sampler
         
     Returns:
@@ -252,6 +371,12 @@ def generate_samples(model, diffusion, num_samples, img_size, channels=3,
         return sampler_obj.sample(model, shape, **sampler_kwargs)
     elif sampler == 'ddim':
         sampler_obj = DDIMSampler(diffusion, eta=sampler_kwargs.pop('eta', 0.0))
+        return sampler_obj.sample(model, shape, **sampler_kwargs)
+    elif sampler == 'dpm':
+        sampler_obj = DPMSolverPlusPlus(diffusion, order=sampler_kwargs.pop('order', 2))
+        return sampler_obj.sample(model, shape, **sampler_kwargs)
+    elif sampler == 'heun':
+        sampler_obj = Heun2ndOrderSampler()
         return sampler_obj.sample(model, shape, **sampler_kwargs)
     else:
         raise ValueError(f"Unknown sampler: {sampler}")
@@ -275,3 +400,4 @@ def visualize_generation_process(model, diffusion, img_size, channels=3,
     shape = (1, img_size, img_size, channels)
     sampler = DDPMSampler(diffusion)
     return sampler.sample_progressive(model, shape, save_interval=save_interval)
+
