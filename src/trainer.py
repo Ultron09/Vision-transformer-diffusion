@@ -28,7 +28,7 @@ class DiffusionTrainer:
     5. Backpropagate and update parameters
     """
     
-    def __init__(self, model, diffusion, optimizer=None, device='cpu'):
+    def __init__(self, model, diffusion, optimizer=None, device='cpu', use_ema=False, ema_decay=0.9999, accumulate_grad_batches=1):
         """
         Initialize Diffusion Trainer
         
@@ -37,6 +37,9 @@ class DiffusionTrainer:
             diffusion: GaussianDiffusion instance
             optimizer: Optimizer (default: Adam with lr=1e-4)
             device: Device to train on (currently only 'cpu' for NumPy)
+            use_ema: Whether to track Exponential Moving Average (EMA) of model parameters
+            ema_decay: EMA decay coefficient (e.g., 0.9999)
+            accumulate_grad_batches: Number of batches over which to accumulate gradients
         """
         self.model = model
         self.diffusion = diffusion
@@ -47,6 +50,17 @@ class DiffusionTrainer:
             self.optimizer = optimizer
         
         self.device = device
+        self.use_ema = use_ema
+        self.accumulate_grad_batches = accumulate_grad_batches
+        self.accumulated_grads = {}
+        self.accum_counter = 0
+        
+        # EMA Tracker
+        if self.use_ema:
+            from .optimizers import EMAModelTracker
+            self.ema_tracker = EMAModelTracker(self.model.parameters(), decay=ema_decay)
+        else:
+            self.ema_tracker = None
         
         # Training statistics
         self.step = 0
@@ -55,7 +69,7 @@ class DiffusionTrainer:
     
     def train_step(self, batch):
         """
-        Single training step
+        Single training step with optional gradient accumulation and EMA update
         
         Args:
             batch: Batch of images (batch_size, H, W, C)
@@ -83,19 +97,35 @@ class DiffusionTrainer:
         # 6. Backward pass
         # Gradient of MSE loss: 2 * (predicted - target) / n
         grad_output = 2 * (predicted_noise - noise) / np.prod(noise.shape)
-        
-        # Backpropagate through model
+        if self.accumulate_grad_batches > 1:
+            grad_output = grad_output / self.accumulate_grad_batches
+            
         self.model.backward(grad_output)
         
         # 7. Get parameters and gradients
-        params = self.model.parameters()
         grads = self.model.gradients()
+        self.accum_counter += 1
         
-        # 8. Update parameters
-        updated_params = self.optimizer.update(params, grads)
-        
-        # 9. Set updated parameters back to model
-        self._set_model_parameters(updated_params)
+        # Accumulate gradients if requested
+        if self.accumulate_grad_batches > 1:
+            for k, v in grads.items():
+                if v is not None:
+                    if k not in self.accumulated_grads:
+                        self.accumulated_grads[k] = v.copy()
+                    else:
+                        self.accumulated_grads[k] += v
+                        
+        if self.accum_counter % self.accumulate_grad_batches == 0:
+            active_grads = self.accumulated_grads if self.accumulate_grad_batches > 1 else grads
+            params = self.model.parameters()
+            updated_params = self.optimizer.update(params, active_grads)
+            self._set_model_parameters(updated_params)
+            
+            # Update EMA shadow copy
+            if self.ema_tracker is not None:
+                self.ema_tracker.update(self.model.parameters(), step=self.step)
+                
+            self.accumulated_grads = {}
         
         # Track statistics
         self.step += 1

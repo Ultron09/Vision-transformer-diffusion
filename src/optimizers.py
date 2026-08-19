@@ -335,3 +335,84 @@ class LRScheduler:
         lr = base_lr * (gamma ** num_decays)
         optimizer.set_lr(lr)
         return lr
+
+
+class EMAModelTracker:
+    """
+    Exponential Moving Average (EMA) Weight Tracker
+    
+    Maintains a smoothed shadow copy of model weights during training.
+    Essential for diffusion models to eliminate high-frequency parameter oscillations
+    and achieve superior FID and sample fidelity.
+    
+    Formula:
+        θ_EMA = β * θ_EMA + (1 - β) * θ_model
+        
+    With warmup decay scheduling:
+        β_t = min(β, 1 - (1 + t)^(-power))
+    """
+    
+    def __init__(self, model_params, decay=0.9999, warmup_power=0.75):
+        """
+        Initialize EMA Tracker
+        
+        Args:
+            model_params: Dictionary of initial model parameters
+            decay: Target EMA decay coefficient (default 0.9999)
+            warmup_power: Exponential warmup factor for early training steps
+        """
+        self.decay = decay
+        self.warmup_power = warmup_power
+        self.shadow_params = {k: v.copy() for k, v in model_params.items()}
+        self.backup_params = {}
+        self.step_count = 0
+        
+    def update(self, model_params, step=None):
+        """
+        Update shadow weights with current model parameters.
+        """
+        if step is not None:
+            self.step_count = step
+        else:
+            self.step_count += 1
+            
+        # Warmup decay factor
+        effective_decay = min(self.decay, 1.0 - (1.0 + self.step_count) ** (-self.warmup_power))
+        
+        for name, param in model_params.items():
+            if name in self.shadow_params:
+                self.shadow_params[name] = (
+                    effective_decay * self.shadow_params[name] + (1.0 - effective_decay) * param
+                )
+            else:
+                self.shadow_params[name] = param.copy()
+                
+    def apply_shadow(self, model):
+        """
+        Temporarily replace model parameters with shadow parameters for sampling/eval.
+        """
+        self.backup_params = {k: v.copy() for k, v in model.parameters().items()}
+        self._set_params(model, self.shadow_params)
+        
+    def restore(self, model):
+        """
+        Restore original training parameters back to model.
+        """
+        if self.backup_params:
+            self._set_params(model, self.backup_params)
+            self.backup_params = {}
+            
+    def _set_params(self, model, params):
+        if hasattr(model, 'set_parameters'):
+            model.set_parameters(params)
+        else:
+            # Fallback parameter mapping
+            for name, val in params.items():
+                parts = name.split('.')
+                obj = model
+                for p in parts[:-1]:
+                    if hasattr(obj, p):
+                        obj = getattr(obj, p)
+                if hasattr(obj, parts[-1]):
+                    setattr(obj, parts[-1], val.copy())
+
