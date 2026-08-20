@@ -19,6 +19,7 @@ from . import trainer
 from . import sampler
 from . import data_utils
 from . import rope
+from . import metrics
 
 __all__ = [
     "activations",
@@ -34,4 +35,5 @@ __all__ = [
     "sampler",
     "data_utils",
     "rope",
+    "metrics",
 ]
