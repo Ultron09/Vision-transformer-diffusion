@@ -20,6 +20,7 @@ from . import sampler
 from . import data_utils
 from . import rope
 from . import metrics
+from . import export
 
 __all__ = [
     "activations",
@@ -36,4 +37,5 @@ __all__ = [
     "data_utils",
     "rope",
     "metrics",
+    "export",
 ]
