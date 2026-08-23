@@ -258,6 +258,62 @@ def test_sampling():
     print(f"    Value range: [{samples.min():.2f}, {samples.max():.2f}]")
 
 
+def test_advanced_features():
+    """Test modern DiT additions: 2D RoPE, EDM Schedule, DPM-Solver++, EMA, FID, ModelExporter"""
+    print("\nTesting advanced modules & modern DiT features...")
+    import tempfile
+    from src.rope import RotaryEmbedding2D
+    from src.diffusion_process import EDMNoiseSchedule
+    from src.sampler import DPMSolverPlusPlus
+    from src.optimizers import EMAModelTracker
+    from src.metrics import calculate_frechet_distance, calculate_inception_score
+    from src.export import ModelExporter
+    from src.unet_vit import SimplifiedViTUNet
+    from src.diffusion_process import GaussianDiffusion
+    
+    # 1. RoPE-2D
+    rope = RotaryEmbedding2D(dim=64)
+    q = np.random.randn(2, 4, 16, 64)
+    k = np.random.randn(2, 4, 16, 64)
+    q_rot, k_rot = rope.apply_rotary_emb(q, k, 4, 4)
+    assert q_rot.shape == q.shape and k_rot.shape == k.shape
+    print(f"  ✓ 2D Rotary Positional Embedding (RoPE): shape {q_rot.shape}")
+    
+    # 2. EDM Schedule
+    edm = EDMNoiseSchedule()
+    sigmas = edm.get_sigmas(num_steps=15)
+    assert len(sigmas) == 16 and sigmas[-1] == 0.0
+    print(f"  ✓ EDM Continuous Noise Schedule: {len(sigmas)} steps from σ_max={sigmas[0]} to σ_min={sigmas[-2]:.4f}")
+    
+    # 3. Fast DPM-Solver++
+    model = SimplifiedViTUNet(img_size=16, patch_size=4, in_channels=3, embed_dim=32, depth=1, num_heads=2)
+    diffusion = GaussianDiffusion(num_timesteps=20)
+    dpm = DPMSolverPlusPlus(diffusion, order=2)
+    samples_dpm = dpm.sample(model, shape=(1, 16, 16, 3), num_steps=5)
+    assert samples_dpm.shape == (1, 16, 16, 3)
+    print(f"  ✓ DPM-Solver++ (2nd Order Fast ODE): generated {samples_dpm.shape} in 5 steps")
+    
+    # 4. EMA Model Tracker
+    ema = EMAModelTracker(model.parameters(), decay=0.999)
+    ema.update(model.parameters(), step=10)
+    assert len(ema.shadow_params) == len(model.parameters())
+    print(f"  ✓ EMA Shadow Parameter Tracker: tracking {len(ema.shadow_params)} tensors")
+    
+    # 5. FID & Inception Score Metrics
+    mu1, mu2 = np.zeros(32), np.ones(32) * 0.1
+    sigma1, sigma2 = np.eye(32), np.eye(32)
+    fid = calculate_frechet_distance(mu1, sigma1, mu2, sigma2)
+    probs = np.ones((50, 10)) / 10.0
+    is_mean, is_std = calculate_inception_score(probs, num_splits=5)
+    print(f"  ✓ Generative Metrics: FID={fid:.4f}, IS={is_mean:.2f}±{is_std:.2f}")
+    
+    # 6. Model Exporter & SafeTensors
+    tmp_path = os.path.join(tempfile.gettempdir(), 'test_vit_dit.npz')
+    checksum = ModelExporter.save_checkpoint(tmp_path, model)
+    meta = ModelExporter.load_checkpoint(tmp_path, model)
+    print(f"  ✓ Checkpoint Serialization & SHA-256 Checksum: {checksum[:16]}...")
+
+
 def main():
     """Run all tests"""
     print("=" * 60)
@@ -276,6 +332,7 @@ def main():
         test_unet_vit()
         test_training_step()
         test_sampling()
+        test_advanced_features()
         
         print("\n" + "=" * 60)
         print("✅ All tests passed successfully!")

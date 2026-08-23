@@ -35,33 +35,36 @@ All components are built from scratch using only NumPy, making this an ideal edu
 
 **Vision Transformer Components:**
 - ✅ Patch embedding (image → patch sequences)
-- ✅ Multi-head self-attention mechanism
-- ✅ Position embeddings (learnable)
-- ✅ Layer normalization
+- ✅ Multi-head self-attention mechanism & cross-attention
+- ✅ 2D Rotary Position Embeddings (RoPE-2D) with spatial frequency decomposition
+- ✅ Position embeddings (learnable & sinusoidal)
+- ✅ Adaptive layer normalization (adaLN)
 - ✅ Transformer encoder blocks
 - ✅ MLP (feed-forward) layers
 
 **Diffusion Model Components:**
 - ✅ Forward diffusion process (noise scheduling)
 - ✅ Reverse diffusion process (denoising)
-- ✅ Noise prediction network (ViT-based)
-- ✅ Beta schedules (linear, cosine)
-- ✅ Time step embeddings
-- ✅ DDPM and DDIM sampling
+- ✅ Classifier-Free Guidance (CFG) conditioning
+- ✅ Continuous-time EDM (Karras et al.) noise schedule and preconditioning
+- ✅ Discrete beta schedules (linear, cosine)
+- ✅ Time step embeddings (sinusoidal + MLP)
+- ✅ Multi-order sampling: DDPM, DDIM, DPM-Solver++, Heun 2nd-Order
 
-**Training Infrastructure:**
-- ✅ Complete training loop
-- ✅ Adam optimizer
-- ✅ Learning rate scheduling
-- ✅ Gradient clipping
-- ✅ Checkpointing system
-- ✅ Progress tracking
+**Training & Production Infrastructure:**
+- ✅ Complete training loop with gradient accumulation
+- ✅ Exponential Moving Average (EMA) shadow weight tracking
+- ✅ Adam optimizer with learning rate warmup and cosine annealing
+- ✅ Gradient clipping by global norm
+- ✅ Pure NumPy Fréchet Inception Distance (FID) and Inception Score (IS) evaluation
+- ✅ Zero-dependency SafeTensors serialization & SHA-256 integrity verification
+- ✅ Comprehensive numerical gradient checking and latency profiler
 
 **Educational Features:**
 - ✅ Detailed mathematical derivations in docstrings
 - ✅ Comprehensive comments explaining each operation
 - ✅ Modular, readable code structure
-- ✅ Example training and generation scripts
+- ✅ Example training, generation, and benchmarking scripts
 - ✅ Visualization utilities
 
 ## 🏗️ Architecture
